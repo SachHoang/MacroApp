@@ -1,0 +1,31 @@
+# Python cache and local environments
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# Build outputs
+build/
+dist/
+*.exe
+*.pkg
+*.toc
+*.pyz
+
+# App local data
+macro_steps.json
+
+# Secrets and local config
+.env
+.env.*
+*.local
+*.secret
+*.key
+
+# Editors and OS files
+.idea/
+.vscode/
+Thumbs.db
+Desktop.ini
