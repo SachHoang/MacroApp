@@ -1,5 +1,6 @@
-import ctypes
+﻿import ctypes
 import json
+import sys
 import threading
 import time
 from dataclasses import asdict, dataclass, field
@@ -10,7 +11,13 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from pynput import keyboard, mouse
 
 
-CONFIG_PATH = Path(__file__).with_name("macro_steps.json")
+# Xác định vị trí lưu macro_steps.json
+# Nếu chạy từ .exe (PyInstaller), lưu cùng thư mục với .exe
+# Nếu chạy từ source code, lưu cùng thư mục với app.py
+if getattr(sys, 'frozen', False):
+    CONFIG_PATH = Path(sys.executable).parent / "macro_steps.json"
+else:
+    CONFIG_PATH = Path(__file__).with_name("macro_steps.json")
 DEFAULT_DELAY_MS = 250
 FAILSAFE_X = 0
 FAILSAFE_Y = 0
