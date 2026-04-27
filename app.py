@@ -106,6 +106,7 @@ class MacroStudio(QtWidgets.QMainWindow):
         self.record_current_move_start: Optional[float] = None
         self.record_current_move_last_sample: Optional[float] = None
         self.record_current_move_last_position: Optional[tuple[int, int]] = None
+        self.record_active_modifiers: set[str] = set()
 
         self.keyboard_controller = keyboard.Controller()
         self.mouse_controller = mouse.Controller()
@@ -966,15 +967,36 @@ class MacroStudio(QtWidgets.QMainWindow):
         self.hide()
 
         def on_press(key_pressed) -> None:
+            # Cập nhật trạng thái modifier keys
+            modifier_name = self._get_modifier_key_name(key_pressed)
+            if modifier_name:
+                self.record_active_modifiers.add(modifier_name)
+            
+            # Lấy tên phím bình thường
             key_name = self._normalize_recorded_key(key_pressed)
             if key_name:
-                self._record_discrete_action(
-                    MacroAction(action_type="key_down", key=key_name, post_delay_ms=default_delay)
-                )
+                # Nếu có modifier keys đang giữ và key này không phải modifier, ghi combo_press
+                if self.record_active_modifiers and not modifier_name:
+                    combo_keys = sorted(list(self.record_active_modifiers)) + [key_name]
+                    self._record_discrete_action(
+                        MacroAction(action_type="combo_press", keys=combo_keys, post_delay_ms=default_delay)
+                    )
+                elif not modifier_name:
+                    # Chỉ ghi key_down nếu không phải modifier key
+                    self._record_discrete_action(
+                        MacroAction(action_type="key_down", key=key_name, post_delay_ms=default_delay)
+                    )
 
         def on_release(key_released) -> None:
+            # Cập nhật trạng thái modifier keys
+            modifier_name = self._get_modifier_key_name(key_released)
+            if modifier_name:
+                self.record_active_modifiers.discard(modifier_name)
+            
+            # Lấy tên phím bình thường
             key_name = self._normalize_recorded_key(key_released)
-            if key_name:
+            if key_name and not modifier_name:
+                # Chỉ ghi key_up nếu không phải modifier key
                 self._record_discrete_action(
                     MacroAction(action_type="key_up", key=key_name, post_delay_ms=default_delay)
                 )
@@ -1043,6 +1065,7 @@ class MacroStudio(QtWidgets.QMainWindow):
         self.record_current_move_start = None
         self.record_current_move_last_sample = None
         self.record_current_move_last_position = None
+        self.record_active_modifiers.clear()
 
     def _record_discrete_action(self, action: MacroAction) -> None:
         if not self.is_recording:
@@ -1294,12 +1317,46 @@ class MacroStudio(QtWidgets.QMainWindow):
         }
         return button_map.get(button_name, mouse.Button.left)
 
+    def _get_modifier_key_name(self, recorded_key) -> Optional[str]:
+        """Kiểm tra xem phím có phải modifier key không, trả về tên modifier nếu đúng."""
+        modifier_names = {
+            "shift_l", "shift_r",
+            "ctrl_l", "ctrl_r",
+            "alt_l", "alt_r",
+            "cmd", "cmd_l", "cmd_r",
+        }
+        text = str(recorded_key)
+        if text.startswith("Key."):
+            key_name = text.split(".", 1)[1].lower()
+            if key_name in modifier_names:
+                return key_name
+        return None
+
     def _normalize_recorded_key(self, recorded_key) -> Optional[str]:
+        """Chuyển đổi phím ghi được thành tên phím chuẩn, xử lý cả control characters."""
+        # Map control characters thành tổ hợp phím
+        control_char_map = {
+            "\x01": "a",      # Ctrl+A
+            "\x03": "c",      # Ctrl+C
+            "\x06": "f",      # Ctrl+F
+            "\x16": "v",      # Ctrl+V (SYN character)
+            "\x18": "x",      # Ctrl+X
+            "\x19": "y",      # Ctrl+Y
+            "\x1a": "z",      # Ctrl+Z
+        }
+        
         if hasattr(recorded_key, "char") and recorded_key.char:
-            char = recorded_key.char.lower()
-            if char == "\x08":
+            char = recorded_key.char
+            # Kiểm tra xem có phải control character không
+            if char in control_char_map:
+                return control_char_map[char]
+            # Kiểm tra xem có phải regular character không
+            if ord(char) >= 32:  # Printable characters
+                return char.lower()
+            if char == "\x08":  # Backspace
                 return "backspace"
-            return char
+            return None
+        
         text = str(recorded_key)
         if text.startswith("Key."):
             key_name = text.split(".", 1)[1].lower()
