@@ -107,6 +107,7 @@ class MacroStudio(QtWidgets.QMainWindow):
         self.record_current_move_last_sample: Optional[float] = None
         self.record_current_move_last_position: Optional[tuple[int, int]] = None
         self.record_active_modifiers: set[str] = set()
+        self.record_combo_down_keys: set[str] = set()
 
         self.keyboard_controller = keyboard.Controller()
         self.mouse_controller = mouse.Controller()
@@ -981,6 +982,7 @@ class MacroStudio(QtWidgets.QMainWindow):
                     self._record_discrete_action(
                         MacroAction(action_type="combo_press", keys=combo_keys, post_delay_ms=default_delay)
                     )
+                    self.record_combo_down_keys.add(key_name)
                 elif not modifier_name:
                     # Chỉ ghi key_down nếu không phải modifier key
                     self._record_discrete_action(
@@ -996,10 +998,13 @@ class MacroStudio(QtWidgets.QMainWindow):
             # Lấy tên phím bình thường
             key_name = self._normalize_recorded_key(key_released)
             if key_name and not modifier_name:
-                # Chỉ ghi key_up nếu không phải modifier key
-                self._record_discrete_action(
-                    MacroAction(action_type="key_up", key=key_name, post_delay_ms=default_delay)
-                )
+                # Nếu phím này là phần của combo_press vừa ghi, bỏ qua key_up riêng lẻ
+                if key_name in self.record_combo_down_keys:
+                    self.record_combo_down_keys.discard(key_name)
+                else:
+                    self._record_discrete_action(
+                        MacroAction(action_type="key_up", key=key_name, post_delay_ms=default_delay)
+                    )
 
         def on_move(x, y) -> None:
             self._record_mouse_move(int(x), int(y), default_delay)
@@ -1066,6 +1071,7 @@ class MacroStudio(QtWidgets.QMainWindow):
         self.record_current_move_last_sample = None
         self.record_current_move_last_position = None
         self.record_active_modifiers.clear()
+        self.record_combo_down_keys.clear()
 
     def _record_discrete_action(self, action: MacroAction) -> None:
         if not self.is_recording:
