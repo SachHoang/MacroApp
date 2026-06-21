@@ -101,6 +101,16 @@ class MacroStudio(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Studio Macro - Ghi và Phát Macro Tự Động")
+        
+        # Load app icon
+        if getattr(sys, 'frozen', False):
+            base_path = Path(sys._MEIPASS)
+        else:
+            base_path = Path(__file__).parent
+        icon_path = base_path / "assets" / "app_icon.png"
+        if icon_path.exists():
+            self.setWindowIcon(QtGui.QIcon(str(icon_path)))
+
         self._aspect_ratio = 16 / 9
         self._resizing_guard = False
         self.resize(1280, 720)
