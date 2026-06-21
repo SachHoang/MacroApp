@@ -29,3 +29,6 @@ macro_steps.json
 .vscode/
 Thumbs.db
 Desktop.ini
+
+codes.json
+*.spec

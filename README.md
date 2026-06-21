@@ -1,125 +1,64 @@
-# MacroApp
+# MacroStudio
 
-Ứng dụng desktop Windows để ghi, chỉnh sửa và phát lại macro bàn phím, chuột với giao diện trực quan, có chế độ ghi thông minh và cơ chế dừng an toàn.
+Ứng dụng desktop Windows để ghi, chỉnh sửa và phát lại macro bàn phím, chuột với giao diện hiện đại, trực quan, có chế độ ghi thông minh và cơ chế dừng an toàn.
 
-## Điểm nổi bật
+## 🚀 Các tính năng nổi bật & Cập nhật mới nhất
 
-- Ghi lại thao tác bàn phím và chuột theo thời gian thực
-- Lưu cả nhấn, giữ, thả phím và quỹ đạo di chuyển chuột
-- Phát macro tuần tự theo vòng lặp cho đến khi dừng
-- Hỗ trợ tổ hợp phím như `Ctrl+C`, `Ctrl+V`, `Ctrl+Shift+S`
-- Chỉnh sửa từng action trực tiếp trong timeline editor
-- Dừng khẩn cấp bằng phím `F8` hoặc kéo chuột lên góc trên trái màn hình
-- Tự động lưu dữ liệu macro cục bộ vào `macro_steps.json`
+- **Giao diện hiện đại & thân thiện (Mới):** Cập nhật toàn diện với ngôn ngữ thiết kế phẳng, tông màu sáng thanh lịch, hiệu ứng đổ bóng và bo góc cao cấp. Giao diện được chia bố cục thông minh với **Bảng Cài đặt Chi tiết (Right Panel)** giúp thao tác dễ dàng.
+- **Tự động lọc tìm phím (Mới):** Các ô chọn phím (Dropdown) được tích hợp bộ máy Auto-complete, tự động lọc danh sách phím theo các ký tự bạn gõ (ví dụ gõ `E` sẽ ra `enter`, `esc`, v.v.), giúp bạn thao tác siêu tốc mà không cần gõ thủ công.
+- **Tổ hợp phím trực quan (Mới):** Cấu hình tổ hợp phím (Combo) trực tiếp qua 3 thẻ chọn riêng biệt thay vì nhập tay chuỗi ký tự dài dòng, hạn chế tối đa rủi ro gõ sai định dạng.
+- **Bắt tọa độ thông minh (Mới):** Nút "Chụp tọa độ" liên kết trực tiếp vào khu vực chỉnh sửa để tự động điền giá trị tọa độ X và Y của con trỏ chuột trong 2 giây.
+- Khắc phục triệt để các lỗi về lưu thông số và làm mới giao diện.
+- **Chức năng gốc:**
+  - Ghi lại thao tác bàn phím và chuột theo thời gian thực (Lưu cá nhân, giữ, thả phím và quỹ đạo di chuyển chuột).
+  - Ghi đè hoặc ghi nối tiếp macro linh hoạt.
+  - Hỗ trợ dừng khẩn cấp bằng phím `F8`.
+  - Tự động lưu dữ liệu macro nội bộ vào file `macro_steps.json`.
 
-## Tải ứng dụng
+## 📦 Tải xuống & Cài đặt
 
-Phiên bản `.exe` cho Windows sẽ được phát hành trong mục `Releases` của repo:
+Phiên bản có thể chạy ngay không cần cài đặt `.exe` dành cho Windows đã được phát hành trong mục **Releases**:
 
-- Repo: <https://github.com/SachHoang/MacroApp>
-- Releases: <https://github.com/SachHoang/MacroApp/releases>
+- **Trang Releases**: [Nhấp vào đây để tải về bản mới nhất](https://github.com/SachHoang/MacroApp/releases)
+- **Tải tệp ZIP**: Tải tệp `MacroStudio.zip` mới nhất, giải nén và mở file `MacroStudio.exe` để sử dụng ngay mà không cần cài đặt Python.
 
-Nếu bạn chỉ muốn dùng app mà không cần cài Python, hãy tải file `StudioMacro.exe` từ trang release.
+## 💻 Dành cho Lập trình viên (Chạy từ mã nguồn)
 
-## Công nghệ sử dụng
+Công nghệ sử dụng:
+- Python 3.13+
+- PySide6 (Giao diện)
+- pynput (Xử lý thiết bị ngoại vi)
+- PyInstaller (Build exe)
 
-- Python 3
-- PySide6
-- pynput
-- PyInstaller
-
-## Chạy từ mã nguồn
-
+Cách chạy lệnh:
 ```powershell
 python -m pip install -r requirements.txt
 python app.py
 ```
 
-## Build file EXE
-
+Cách build file exe (Windows):
 ```powershell
-build_exe.bat
+python -m PyInstaller --noconfirm --onedir --windowed --name "MacroStudio" "app.py"
 ```
 
-Hoặc build thủ công:
+Thư mục thành phẩm sẽ xuất hiện tại `dist/MacroStudio/`.
 
-```powershell
-python -m PyInstaller --noconfirm --clean macro_studio.spec
-```
+## 📖 Hướng dẫn sử dụng nhanh
 
-File chạy sau khi build nằm tại:
+### 1. Tạo và chỉnh sửa Macro
+- Bấm vào một bước ở danh sách bên trái để mở ra **Bảng Cài đặt Chi tiết** bên phải.
+- Ở đây bạn có thể chọn **Loại hành động**, đổi phím, đổi thời gian **Delay (ms)**, hoặc sửa **Tọa độ (X, Y)**.
+- Gõ thẳng chữ cái mong muốn vào khung chọn phím để tự động lọc ra phím.
+- Nhấn **Lưu thay đổi** để cập nhật thay đổi cho bước macro đó.
 
-```text
-dist\StudioMacro.exe
-```
+### 2. Ghi Macro tự động
+- Chọn `Ghi thêm` để nối tiếp macro cũ.
+- Chọn `Ghi đè` để xóa macro cũ và ghi lại từ đầu.
+- Thực hiện thao tác thật trên máy.
+- Nhấn `F8` hoặc bấm nút dừng để kết thúc quá trình ghi.
 
-## Cách sử dụng nhanh
+### 3. An toàn thông tin & Git
+Dự án đã được thiết lập sẵn `.gitignore` để không tự động đẩy các file chứa thông tin nhạy cảm (như file `macro_steps.json` lưu giữ macro thao tác cá nhân của bạn) lên môi trường Public. Bạn hoàn toàn có thể yên tâm khi tải ứng dụng của mình lên GitHub.
 
-### 1. Tạo macro
-
-- Thêm phím đơn như `a`, `enter`, `space`
-- Thêm tổ hợp phím với modifier và phím chính
-- Thêm click chuột theo tọa độ
-- Thêm bước chờ theo milliseconds
-
-### 2. Ghi macro tự động
-
-- Chọn `Ghi thêm` để nối tiếp macro cũ
-- Chọn `Ghi thay thế` để xóa macro cũ và ghi lại từ đầu
-- Thực hiện thao tác thật trên máy
-- Nhấn `F8` hoặc bấm nút dừng để kết thúc ghi
-
-### 3. Phát macro
-
-- Nhấn `Bắt đầu`
-- Macro sẽ chạy tuần tự từng bước
-- Macro lặp liên tục cho đến khi bạn dừng
-
-## Timeline editor
-
-- Chọn một action trong danh sách để chỉnh sửa chi tiết
-- Có thể đổi loại action, delay, key, click, combo hoặc quỹ đạo chuột
-- Với `mouse move`, mỗi dòng dữ liệu có dạng `t,x,y`
-- Có thể áp dụng thay đổi, nhân bản hoặc chèn action mới ngay dưới action hiện tại
-
-## Lưu ý an toàn
-
-- App macro có thể tự thao tác chuột và bàn phím trên máy thật
-- Luôn kiểm tra kỹ trước khi chạy vòng lặp dài
-- Dùng `F8` để dừng khẩn cấp nếu macro chạy sai
-- Không đưa `macro_steps.json` lên GitHub vì file này có thể chứa dữ liệu thao tác riêng của bạn
-
-## Đưa source lên GitHub an toàn
-
-Repo đã được cấu hình để không commit các dữ liệu dễ lộ thông tin cá nhân:
-
-- `build/`
-- `dist/`
-- `__pycache__/`
-- `macro_steps.json`
-- file `.env` và các file secret cục bộ
-
-Chi tiết thêm có trong [GITHUB_UPLOAD_GUIDE.md](./GITHUB_UPLOAD_GUIDE.md).
-
-## Cấu trúc dự án
-
-```text
-.
-|-- app.py
-|-- build_exe.bat
-|-- macro_studio.spec
-|-- requirements.txt
-|-- macro_steps.example.json
-|-- README.md
-```
-
-## Hướng phát triển
-
-- Thêm import/export macro dễ dùng hơn
-- Thêm preset macro mẫu
-- Tối ưu giao diện và trải nghiệm chỉnh sửa timeline
-- Thêm versioning cho file macro
-
-## Giấy phép
-
-Hiện repo chưa gắn license. Nếu bạn muốn public rộng rãi, nên thêm `MIT License`.
+## 🛡️ Giấy phép
+Mã nguồn được cung cấp nội bộ, có thể gắn thêm `MIT License` nếu muốn phát hành công khai.

@@ -1,0 +1,76 @@
+<!-- index.js -->
+<!DOCTYPE html>
+
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" name="viewport"/>
+<link href="css/index.css?v=260524192132" media="all" onload="this.media='all'" rel="stylesheet"/>
+<noscript><link href="css/index.css?v=260524192132" rel="stylesheet"/></noscript>
+<title>祝福语</title>
+</head>
+<body>
+<div class="notice-modal" id="noticeModal">
+<div class="notice-content">
+<div class="notice-header">
+<span class="notice-title">📢 喇叭</span>
+<button class="notice-close" onclick="closeNotice()">×</button>
+</div>
+<div class="notice-body">
+<div class="single-column" id="noticeList">
+</div>
+</div>
+<div class="notice-footer">
+<label class="notice-checkbox">
+<input id="dontShowToday" onchange="toggleDontShowToday()" type="checkbox"/> 未来6天不显示
+        </label>
+</div>
+</div>
+</div>
+<div class="header">
+<a class="github-style-btn" href="https://gitee.com/lalalasf/fang3-html/issues/ICGXI3">
+<svg fill="currentColor" height="16" style="margin-inline-end: 4px;" viewbox="0 0 16 16" width="16">
+<path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 
+          0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" fill-rule="evenodd">
+</path>
+</svg>
+<span>建议</span>
+</a>
+<a class="btn-auto-copy btn-notice" href="javascript:void(0)" onclick="showNoticeModal()">
+      📢喇叭
+    </a>
+<a class="btn-auto-copy" href="freemarker/article.html">
+      本地导入
+    </a>
+<a class="btn-auto-copy" href="page/auto.html">
+      📌按键宏复制
+    </a>
+</div>
+<div class="container">
+<div class="btn-group sticky-top">
+<button class="btn-range" onclick="showRange(1, 50)">1-50条</button>
+<button class="btn-range" onclick="showRange(51, 100)">51-100条</button>
+<button class="btn-layout" id="toggleLayoutBtn" onclick="toggleLayout()">单列显示</button>
+</div>
+<!--    <a href="https://gitee.com/lalalasf/fang3-html/issues" 
+        class="issue-btn" 
+        style="display: inline-block; padding: 8px 16px; background-color: #f1f8ff; color: #0366d6; border: 1px solid #d1d5da; border-radius: 6px; text-decoration: none; font-weight: 500; transition: all 0.2s;">
+        📌 创建issue建议或问题
+     </a> -->
+<!--     <a href="https://gitee.com/lalalasf/fang3-html/issues" 
+        style="color: #57606a; text-decoration: none; border-block-end: 1px dashed #57606a; padding-block-end: 2px;">创建issue建议或问题</a> -->
+<div class="hint">
+<p>{1 第1条} {2-5 第2、3、4、5条}{空格分开}</p>
+</div>
+<div class="btn-group">
+<input class="btn-range" id="idFilterInput" oninput="filterById()" placeholder="输入编号筛选：如 1 10 2-6" type="text"/>
+</div>
+<div id="listBox"></div>
+</div>
+<a href="https://beian.miit.gov.cn" id="ICPFiling" role="link" style="display: none;">蜀ICP备2025147027号-1</a>
+<!-- 回到顶部按钮 -->
+<button class="back-to-top" id="backToTop" onclick="backToTop()">↑</button>
+<script src="config/config.js?v=260524192132"></script>
+<script src="js/index.js?v=260524192132"></script>
+</body>
+</html>

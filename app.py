@@ -1,4 +1,4 @@
-﻿import ctypes
+import ctypes
 import json
 import sys
 import threading
@@ -6,9 +6,9 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional
-
 from PySide6 import QtCore, QtGui, QtWidgets
 from pynput import keyboard, mouse
+from code_manager import CodeManager, CodeItem
 
 
 # Xác định vị trí lưu macro_steps.json
@@ -16,8 +16,10 @@ from pynput import keyboard, mouse
 # Nếu chạy từ source code, lưu cùng thư mục với app.py
 if getattr(sys, 'frozen', False):
     CONFIG_PATH = Path(sys.executable).parent / "macro_steps.json"
+    CODES_PATH = Path(sys.executable).parent / "codes.json"
 else:
     CONFIG_PATH = Path(__file__).with_name("macro_steps.json")
+    CODES_PATH = Path(__file__).with_name("codes.json")
 DEFAULT_DELAY_MS = 250
 FAILSAFE_X = 0
 FAILSAFE_Y = 0
@@ -53,6 +55,10 @@ class MacroAction:
             return f"Di chuột theo quỹ đạo {len(self.points)} điểm | nghỉ {self.post_delay_ms}ms"
         if self.action_type == "wait":
             return f"Chờ {self.duration_ms}ms"
+        if self.action_type == "set_clipboard_code":
+            return f"📋 Nạp code tiếp theo vào clipboard | nghỉ {self.post_delay_ms}ms"
+        if self.action_type == "type_code":
+            return f"✍️ Gõ thẳng code tiếp theo | nghỉ {self.post_delay_ms}ms"
         return f"Không rõ: {self.action_type}"
 
 
@@ -73,6 +79,16 @@ class WINDOWCOMPOSITIONATTRIBDATA(ctypes.Structure):
     ]
 
 
+COMMON_KEYS = [
+    *("abcdefghijklmnopqrstuvwxyz"),
+    *("0123456789"),
+    "enter", "space", "tab", "esc", "shift", "shift_l", "shift_r",
+    "ctrl", "ctrl_l", "ctrl_r", "alt", "alt_l", "alt_r", "cmd",
+    "backspace", "delete", "home", "end", "page_up", "page_down",
+    "up", "down", "left", "right", "caps_lock",
+    *([f"f{i}" for i in range(1, 13)])
+]
+
 class MacroStudio(QtWidgets.QMainWindow):
     refresh_actions_requested = QtCore.Signal()
     status_changed = QtCore.Signal(str)
@@ -80,6 +96,7 @@ class MacroStudio(QtWidgets.QMainWindow):
     position_captured = QtCore.Signal(int, int)
     stop_recording_requested = QtCore.Signal()
     stop_macro_requested = QtCore.Signal()
+    clipboard_set_requested = QtCore.Signal(str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -113,18 +130,18 @@ class MacroStudio(QtWidgets.QMainWindow):
         self.mouse_controller = mouse.Controller()
 
         self.palette = {
-            "bg": "#08111D",
-            "panel": "rgba(18, 31, 49, 0.88)",
-            "panelSolid": "#122033",
-            "panelAlt": "rgba(20, 37, 59, 0.92)",
-            "stroke": "rgba(124, 155, 196, 0.25)",
-            "text": "#EAF2FF",
-            "muted": "#9FB2CE",
-            "accent": "#74C0FC",
-            "accent2": "#4DABF7",
-            "danger": "#FF7B72",
-            "success": "#8CE99A",
-            "surface": "rgba(12, 21, 35, 0.94)",
+            "bg": "#FDFBF7",
+            "panel": "#FAF5F0",
+            "panelSolid": "#F5EBE6",
+            "panelAlt": "#FAF5F0",
+            "stroke": "#E8DCD8",
+            "text": "#4A3F3C",
+            "muted": "#8C7A76",
+            "accent": "#D4A5A5",
+            "accent2": "#C28F8F",
+            "danger": "#E08283",
+            "success": "#A3B899",
+            "surface": "#FFFFFF",
         }
 
         self.record_mode_text = "Thêm vào"
@@ -136,6 +153,31 @@ class MacroStudio(QtWidgets.QMainWindow):
         self._apply_window_effects()
         self._load_actions()
         self._start_hotkey_listener()
+
+        # Code Manager
+        self.code_manager = CodeManager(CODES_PATH)
+        self.code_manager.codes_loaded.connect(self._on_codes_loaded)
+        self.code_manager.error_occurred.connect(lambda msg: QtWidgets.QMessageBox.warning(self, "Code Manager", msg))
+        
+        self.clipboard_set_requested.connect(self._set_clipboard_text)
+
+    @QtCore.Slot(str)
+    def _set_clipboard_text(self, text: str) -> None:
+        QtWidgets.QApplication.clipboard().setText(text)
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
+        super().resizeEvent(event)
+        if getattr(self, '_resizing_guard', False):
+            return
+            
+        scale = max(0.75, min(2.0, self.width() / 1280.0))
+        if not hasattr(self, '_last_scale_factor') or abs(self._last_scale_factor - scale) > 0.05:
+            self._last_scale_factor = scale
+            if not hasattr(self, '_resize_timer'):
+                self._resize_timer = QtCore.QTimer(self)
+                self._resize_timer.setSingleShot(True)
+                self._resize_timer.timeout.connect(self._apply_styles)
+            self._resize_timer.start(50)
 
     def _connect_signals(self) -> None:
         self.refresh_actions_requested.connect(self._refresh_action_list)
@@ -151,545 +193,623 @@ class MacroStudio(QtWidgets.QMainWindow):
         self.setCentralWidget(central)
 
         root = QtWidgets.QVBoxLayout(central)
-        root.setContentsMargins(18, 18, 18, 18)
-        root.setSpacing(14)
-
-        hero = QtWidgets.QFrame()
-        hero_layout = QtWidgets.QVBoxLayout(hero)
-        hero_layout.setContentsMargins(8, 0, 8, 0)
-        hero_layout.setSpacing(4)
-
-        title = QtWidgets.QLabel("Macro Studio")
-        title.setObjectName("HeroTitle")
-        subtitle = QtWidgets.QLabel(
-            "Ghi lại các thao tác thực tế, lưu quỹ đạo chuột, phát lại tuần tự vô hạn và dừng an toàn bằng phím F8."
-        )
-        subtitle.setObjectName("HeroSubtitle")
-        subtitle.setWordWrap(True)
-        hero_layout.addWidget(title)
-        hero_layout.addWidget(subtitle)
-        root.addWidget(hero)
-
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        
+        # ==========================================
+        # TOP HEADER BAR
+        # ==========================================
+        header = QtWidgets.QWidget()
+        header.setObjectName("TopHeader")
+        header_layout = QtWidgets.QHBoxLayout(header)
+        header_layout.setContentsMargins(20, 12, 20, 12)
+        header_layout.setSpacing(16)
+        
+        # Left side: Title & Status
+        title_layout = QtWidgets.QVBoxLayout()
+        title_layout.setSpacing(2)
+        hero_title = QtWidgets.QLabel("Macro Studio")
+        hero_title.setObjectName("HeroTitle")
+        self.status_label = QtWidgets.QLabel("Sẵn sàng. Dừng macro bằng phím F8 hoặc kéo chuột lên góc trái màn hình.")
+        self.status_label.setObjectName("StatusLabel")
+        title_layout.addWidget(hero_title)
+        title_layout.addWidget(self.status_label)
+        header_layout.addLayout(title_layout)
+        
+        header_layout.addStretch(1)
+        
+        # Right side: Main Controls
+        controls_layout = QtWidgets.QHBoxLayout()
+        controls_layout.setSpacing(8)
+        
+        self.start_button = QtWidgets.QPushButton("▶ Bắt đầu (F8)")
+        self.start_button.setProperty("variant", "primary")
+        self.start_button.clicked.connect(self._start_macro)
+        
+        self.stop_button = QtWidgets.QPushButton("■ Dừng")
+        self.stop_button.setProperty("variant", "danger")
+        self.stop_button.clicked.connect(self._stop_macro)
+        
+        record_append = QtWidgets.QPushButton("● Ghi thêm")
+        record_append.setProperty("variant", "secondary")
+        record_append.clicked.connect(lambda: self._toggle_recording(False))
+        
+        record_replace = QtWidgets.QPushButton("● Ghi đè")
+        record_replace.setProperty("variant", "secondary")
+        record_replace.clicked.connect(lambda: self._toggle_recording(True))
+        
+        stop_record = QtWidgets.QPushButton("■ Dừng ghi")
+        stop_record.setProperty("variant", "secondary")
+        stop_record.clicked.connect(self._stop_recording)
+        
+        capture_button = QtWidgets.QPushButton("◎ Chụp tọa độ")
+        capture_button.setProperty("variant", "secondary")
+        capture_button.clicked.connect(self._capture_mouse_position)
+        
+        controls_layout.addWidget(capture_button)
+        controls_layout.addWidget(record_replace)
+        controls_layout.addWidget(record_append)
+        controls_layout.addWidget(stop_record)
+        controls_layout.addWidget(self.stop_button)
+        controls_layout.addWidget(self.start_button)
+        
+        header_layout.addLayout(controls_layout)
+        root.addWidget(header)
+        
+        # ==========================================
+        # MAIN BODY (3-Column Splitter)
+        # ==========================================
+        body_container = QtWidgets.QWidget()
+        body_layout = QtWidgets.QVBoxLayout(body_container)
+        body_layout.setContentsMargins(16, 16, 16, 16)
+        
         self.body_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
-        self.body_splitter.setChildrenCollapsible(False)
-        self.body_splitter.setHandleWidth(10)
-        root.addWidget(self.body_splitter, 1)
+        self.body_splitter.setHandleWidth(8)
+        body_layout.addWidget(self.body_splitter)
+        root.addWidget(body_container, 1)
 
-        left_host = QtWidgets.QWidget()
-        left_stack = QtWidgets.QVBoxLayout(left_host)
-        left_stack.setContentsMargins(0, 0, 0, 0)
-        left_stack.setSpacing(12)
-        self.body_splitter.addWidget(left_host)
+        # ------------------------------------------
+        # 1. LEFT PANEL (Palette: Tools, Code, Settings)
+        # ------------------------------------------
+        left_panel = QtWidgets.QWidget()
+        left_layout = QtWidgets.QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.left_tabs = QtWidgets.QTabWidget()
+        self.left_tabs.setObjectName("SidebarTabs")
+        left_layout.addWidget(self.left_tabs)
+        
+        # TAB: Thêm hành động
+        tools_tab = QtWidgets.QWidget()
+        tools_layout = QtWidgets.QVBoxLayout(tools_tab)
+        tools_layout.setContentsMargins(12, 16, 12, 12)
+        tools_layout.setSpacing(10)
+        tools_layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignTop)
+        
+        def _add_tool_btn(icon, text, handler):
+            btn = QtWidgets.QPushButton(f"{icon}  {text}")
+            btn.setProperty("variant", "tool")
+            btn.clicked.connect(handler)
+            tools_layout.addWidget(btn)
+            
+        _add_tool_btn("⌨️", "Thêm phím (Key)", self._add_key_action)
+        _add_tool_btn("🔠", "Thêm tổ hợp phím (Combo)", self._add_combo_action)
+        _add_tool_btn("🖱️", "Thêm click chuột (Mouse)", self._add_mouse_action)
+        _add_tool_btn("⏱️", "Thêm chờ (Wait)", self._add_wait_action)
+        _add_tool_btn("📋", "Dán Code (Clipboard)", self._add_clipboard_code_action)
+        _add_tool_btn("✍️", "Gõ Code (Type)", self._add_type_code_action)
+        
+        tools_layout.addStretch(1)
+        self.left_tabs.addTab(tools_tab, "🛠️ Công cụ")
+        
+        # TAB: Code Manager
+        code_tab = QtWidgets.QWidget()
+        code_layout = QtWidgets.QVBoxLayout(code_tab)
+        code_layout.setContentsMargins(12, 16, 12, 12)
+        code_layout.setSpacing(12)
+        
+        code_form = QtWidgets.QFormLayout()
+        code_form.setSpacing(8)
+        self.code_range_input = QtWidgets.QLineEdit("1-50")
+        code_form.addRow("Phạm vi", self.code_range_input)
+        code_layout.addLayout(code_form)
+        
+        code_btn_grid = QtWidgets.QGridLayout()
+        code_btn_grid.setSpacing(8)
+        fetch_btn = QtWidgets.QPushButton("🌐 Tải web")
+        fetch_btn.setProperty("variant", "secondary")
+        fetch_btn.clicked.connect(self._fetch_codes)
+        load_json_btn = QtWidgets.QPushButton("📂 Tải file")
+        load_json_btn.setProperty("variant", "secondary")
+        load_json_btn.clicked.connect(self._load_codes_from_json)
+        code_btn_grid.addWidget(fetch_btn, 0, 0)
+        code_btn_grid.addWidget(load_json_btn, 0, 1)
+        code_layout.addLayout(code_btn_grid)
+        
+        self.code_status_label = QtWidgets.QLabel("Chưa tải code")
+        self.code_status_label.setObjectName("MutedLabel")
+        code_layout.addWidget(self.code_status_label)
+        
+        self.code_list_widget = QtWidgets.QListWidget()
+        self.code_list_widget.setObjectName("CodeList")
+        code_layout.addWidget(self.code_list_widget, 1)
+        
+        self.left_tabs.addTab(code_tab, "🎮 Code")
+        
+        # TAB: Cài đặt
+        settings_tab = QtWidgets.QWidget()
+        settings_layout = QtWidgets.QFormLayout(settings_tab)
+        settings_layout.setContentsMargins(12, 16, 12, 12)
+        settings_layout.setSpacing(12)
+        
+        self.default_delay_input = QtWidgets.QLineEdit(str(DEFAULT_DELAY_MS))
+        self.record_after_input = QtWidgets.QLineEdit("2")
+        settings_layout.addRow("Delay mặc định (ms)", self.default_delay_input)
+        settings_layout.addRow("Chờ trước ghi (giây)", self.record_after_input)
+        
+        self.left_tabs.addTab(settings_tab, "⚙️ Cài đặt")
+        
+        self.body_splitter.addWidget(left_panel)
 
-        left_card = self._create_card()
-        left_layout = QtWidgets.QVBoxLayout(left_card)
-        left_layout.setContentsMargins(18, 18, 18, 18)
-        left_layout.setSpacing(14)
-        left_stack.addWidget(left_card, 5)
-
-        left_header = QtWidgets.QVBoxLayout()
-        left_header.setSpacing(4)
-        timeline_title = QtWidgets.QLabel("Dòng thời gian Macro")
-        timeline_title.setObjectName("SectionTitle")
-        timeline_subtitle = QtWidgets.QLabel("Mỗi bước sẽ chạy tuần tự. Ví dụ: Nếu có 3 bước A, B, C thì sẽ thực hiện A xong mới đến B, rồi C.")
-        timeline_subtitle.setObjectName("MutedLabel")
-        timeline_subtitle.setWordWrap(True)
-        left_header.addWidget(timeline_title)
-        left_header.addWidget(timeline_subtitle)
-        left_layout.addLayout(left_header)
-
+        # ------------------------------------------
+        # 2. CENTER PANEL (Canvas / Timeline)
+        # ------------------------------------------
+        center_panel = self._create_card()
+        center_layout = QtWidgets.QVBoxLayout(center_panel)
+        center_layout.setContentsMargins(16, 16, 16, 16)
+        center_layout.setSpacing(12)
+        
+        # Stats Header
         stats = QtWidgets.QHBoxLayout()
-        stats.setSpacing(10)
-        steps_card, self.steps_value = self._create_stat_card("Số bước", "0")
-        loop_card, self.loop_value = self._create_stat_card("Vòng lặp", "0")
-        mode_card, self.mode_value = self._create_stat_card("Chế độ ghi", "Thêm vào")
-        stats.addWidget(steps_card)
-        stats.addWidget(loop_card)
-        stats.addWidget(mode_card)
-        left_layout.addLayout(stats)
-
+        stats.setSpacing(16)
+        
+        def _create_mini_stat(title, val):
+            vbox = QtWidgets.QVBoxLayout()
+            vbox.setSpacing(2)
+            t_lbl = QtWidgets.QLabel(title)
+            t_lbl.setObjectName("MutedLabel")
+            v_lbl = QtWidgets.QLabel(val)
+            v_lbl.setObjectName("StatValue")
+            vbox.addWidget(t_lbl)
+            vbox.addWidget(v_lbl)
+            return vbox, v_lbl
+            
+        box1, self.steps_value = _create_mini_stat("Số bước", "0")
+        box2, self.loop_value = _create_mini_stat("Vòng lặp", "0")
+        box3, self.mode_value = _create_mini_stat("Chế độ", "Thêm vào")
+        stats.addLayout(box1)
+        stats.addLayout(box2)
+        stats.addLayout(box3)
+        stats.addStretch(1)
+        center_layout.addLayout(stats)
+        
+        # Timeline List
         self.action_list = QtWidgets.QListWidget()
         self.action_list.setObjectName("TimelineList")
-        self.action_list.currentRowChanged.connect(self._load_selected_action_into_editor)
-        left_layout.addWidget(self.action_list, 1)
+        self.action_list.currentRowChanged.connect(self._handle_timeline_selection)
+        center_layout.addWidget(self.action_list, 1)
+        
+        # Timeline Toolbar
+        toolbar = QtWidgets.QHBoxLayout()
+        toolbar.setSpacing(8)
+        
+        btn_up = QtWidgets.QPushButton("▲ Lên")
+        btn_up.setProperty("variant", "ghost")
+        btn_up.clicked.connect(lambda: self._move_selected(-1))
+        
+        btn_down = QtWidgets.QPushButton("▼ Xuống")
+        btn_down.setProperty("variant", "ghost")
+        btn_down.clicked.connect(lambda: self._move_selected(1))
+        
+        btn_del = QtWidgets.QPushButton("✖ Xóa")
+        btn_del.setProperty("variant", "ghost")
+        btn_del.clicked.connect(self._remove_selected)
+        
+        btn_clear = QtWidgets.QPushButton("Xóa hết")
+        btn_clear.setProperty("variant", "ghost")
+        btn_clear.clicked.connect(self._clear_actions)
+        
+        btn_save = QtWidgets.QPushButton("💾 Lưu")
+        btn_save.setProperty("variant", "secondary")
+        btn_save.clicked.connect(self._save_actions)
+        
+        btn_load = QtWidgets.QPushButton("📂 Nạp")
+        btn_load.setProperty("variant", "secondary")
+        btn_load.clicked.connect(self._load_actions)
+        
+        toolbar.addWidget(btn_up)
+        toolbar.addWidget(btn_down)
+        toolbar.addWidget(btn_del)
+        toolbar.addWidget(btn_clear)
+        toolbar.addStretch(1)
+        toolbar.addWidget(btn_load)
+        toolbar.addWidget(btn_save)
+        
+        center_layout.addLayout(toolbar)
+        self.body_splitter.addWidget(center_panel)
 
-        timeline_actions = QtWidgets.QGridLayout()
-        timeline_actions.setHorizontalSpacing(8)
-        timeline_actions.setVerticalSpacing(8)
-        buttons = [
-            ("Xóa bước", self._remove_selected),
-            ("Xóa tất cả", self._clear_actions),
-            ("Lên", lambda: self._move_selected(-1)),
-            ("Xuống", lambda: self._move_selected(1)),
-            ("Lưu file", self._save_actions),
-            ("Nạp file", self._load_actions),
-        ]
-        for index, (label, handler) in enumerate(buttons):
-            button = QtWidgets.QPushButton(label)
-            button.clicked.connect(handler)
-            button.setProperty("variant", "secondary")
-            timeline_actions.addWidget(button, 0, index)
-        left_layout.addLayout(timeline_actions)
-
-        editor_card = self._create_card(alt=True)
-        editor_layout = QtWidgets.QVBoxLayout(editor_card)
-        editor_layout.setContentsMargins(18, 18, 18, 18)
-        editor_layout.setSpacing(10)
-        left_stack.addWidget(editor_card, 4)
-
-        editor_title = QtWidgets.QLabel("Trình chỉnh sửa Macro")
-        editor_title.setObjectName("SectionTitleAlt")
-        editor_text = QtWidgets.QLabel(
-            "Chọn một bước trong dòng thời gian để chỉnh sửa độ trễ, tọa độ, phím, tổ hợp phím hoặc từng điểm quỹ đạo chuột."
-        )
-        editor_text.setObjectName("MutedLabelAlt")
-        editor_text.setWordWrap(True)
-        editor_layout.addWidget(editor_title)
-        editor_layout.addWidget(editor_text)
-
+        # ------------------------------------------
+        # 3. RIGHT PANEL (Inspector)
+        # ------------------------------------------
+        right_panel = self._create_card(alt=True)
+        right_layout = QtWidgets.QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(16, 16, 16, 16)
+        right_layout.setSpacing(12)
+        
+        self.inspector_stack = QtWidgets.QStackedWidget()
+        right_layout.addWidget(self.inspector_stack)
+        
+        # Page 0: Empty State
+        empty_page = QtWidgets.QWidget()
+        empty_layout = QtWidgets.QVBoxLayout(empty_page)
+        empty_layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        empty_lbl = QtWidgets.QLabel("📝 Chọn một hành động để chỉnh sửa")
+        empty_lbl.setObjectName("EmptyLabel")
+        empty_layout.addWidget(empty_lbl)
+        self.inspector_stack.addWidget(empty_page)
+        
+        # Page 1: Edit Action
+        edit_scroll = QtWidgets.QScrollArea()
+        edit_scroll.setWidgetResizable(True)
+        edit_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        edit_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        
+        edit_host = QtWidgets.QWidget()
+        edit_scroll.setWidget(edit_host)
+        edit_layout = QtWidgets.QVBoxLayout(edit_host)
+        edit_layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignTop)
+        edit_layout.setContentsMargins(0, 0, 0, 0)
+        edit_layout.setSpacing(16)
+        
+        editor_title = QtWidgets.QLabel("Thuộc tính")
+        editor_title.setObjectName("SectionTitle")
+        edit_layout.addWidget(editor_title)
+        
         editor_form = QtWidgets.QFormLayout()
-        editor_form.setSpacing(8)
+        editor_form.setSpacing(12)
         self.editor_action_type = QtWidgets.QComboBox()
-        self.editor_action_type.addItems(
-            ["key_tap", "key_down", "key_up", "combo_press", "mouse_click", "mouse_move", "wait"]
-        )
+        self.editor_action_type.addItems(["key_tap", "key_down", "key_up", "combo_press", "mouse_click", "mouse_move", "wait", "set_clipboard_code", "type_code"])
         self.editor_action_type.currentTextChanged.connect(self._update_editor_stack_visibility)
         self.editor_post_delay = QtWidgets.QLineEdit("250")
         editor_form.addRow("Loại action", self.editor_action_type)
         editor_form.addRow("Delay sau bước (ms)", self.editor_post_delay)
-        editor_layout.addLayout(editor_form)
-
+        edit_layout.addLayout(editor_form)
+        
         self.editor_stack = QtWidgets.QStackedWidget()
-        editor_layout.addWidget(self.editor_stack)
-
+        edit_layout.addWidget(self.editor_stack)
+        
+        # Edit Pages
         self.editor_page_key = self._make_editor_page()
-        key_form = QtWidgets.QFormLayout(self.editor_page_key)
-        self.editor_key_input = QtWidgets.QLineEdit()
-        key_form.addRow("Key", self.editor_key_input)
+        key_form2 = QtWidgets.QFormLayout(self.editor_page_key)
+        self.editor_key_input = QtWidgets.QComboBox()
+        self.editor_key_input.addItems(COMMON_KEYS)
+        self.editor_key_input.setEditable(True)
+        completer = QtWidgets.QCompleter(COMMON_KEYS)
+        completer.setCaseSensitivity(QtCore.Qt.CaseInsensitive)
+        completer.setFilterMode(QtCore.Qt.MatchContains)
+        completer.setCompletionMode(QtWidgets.QCompleter.PopupCompletion)
+        self.editor_key_input.setCompleter(completer)
+        key_form2.addRow("Key", self.editor_key_input)
         self.editor_stack.addWidget(self.editor_page_key)
-
+        
         self.editor_page_combo = self._make_editor_page()
-        combo_form = QtWidgets.QFormLayout(self.editor_page_combo)
-        self.editor_combo_keys_input = QtWidgets.QLineEdit()
-        combo_hint = QtWidgets.QLabel("Ví dụ: ctrl_l,c (Ctrl+C) hoặc ctrl_l,shift_l,s (Ctrl+Shift+S)")
-        combo_hint.setObjectName("MutedLabelAlt")
-        combo_hint.setWordWrap(True)
-        combo_form.addRow("Danh sách key", self.editor_combo_keys_input)
-        combo_form.addRow(combo_hint)
+        combo_form2 = QtWidgets.QFormLayout(self.editor_page_combo)
+        self.editor_combo_key1 = QtWidgets.QComboBox()
+        self.editor_combo_key1.addItems([""] + COMMON_KEYS)
+        self.editor_combo_key1.setEditable(True)
+        completer = QtWidgets.QCompleter([""] + COMMON_KEYS)
+        completer.setCaseSensitivity(QtCore.Qt.CaseInsensitive)
+        completer.setFilterMode(QtCore.Qt.MatchContains)
+        completer.setCompletionMode(QtWidgets.QCompleter.PopupCompletion)
+        self.editor_combo_key1.setCompleter(completer)
+        self.editor_combo_key2 = QtWidgets.QComboBox()
+        self.editor_combo_key2.addItems([""] + COMMON_KEYS)
+        self.editor_combo_key2.setEditable(True)
+        completer = QtWidgets.QCompleter([""] + COMMON_KEYS)
+        completer.setCaseSensitivity(QtCore.Qt.CaseInsensitive)
+        completer.setFilterMode(QtCore.Qt.MatchContains)
+        completer.setCompletionMode(QtWidgets.QCompleter.PopupCompletion)
+        self.editor_combo_key2.setCompleter(completer)
+        self.editor_combo_key3 = QtWidgets.QComboBox()
+        self.editor_combo_key3.addItems([""] + COMMON_KEYS)
+        self.editor_combo_key3.setEditable(True)
+        completer = QtWidgets.QCompleter([""] + COMMON_KEYS)
+        completer.setCaseSensitivity(QtCore.Qt.CaseInsensitive)
+        completer.setFilterMode(QtCore.Qt.MatchContains)
+        completer.setCompletionMode(QtWidgets.QCompleter.PopupCompletion)
+        self.editor_combo_key3.setCompleter(completer)
+        combo_form2.addRow("Phím 1", self.editor_combo_key1)
+        combo_form2.addRow("Phím 2", self.editor_combo_key2)
+        combo_form2.addRow("Phím 3", self.editor_combo_key3)
         self.editor_stack.addWidget(self.editor_page_combo)
-
+        
         self.editor_page_click = self._make_editor_page()
-        click_form = QtWidgets.QFormLayout(self.editor_page_click)
+        click_form2 = QtWidgets.QFormLayout(self.editor_page_click)
         self.editor_x_input = QtWidgets.QLineEdit()
         self.editor_y_input = QtWidgets.QLineEdit()
         self.editor_button_input = QtWidgets.QComboBox()
         self.editor_button_input.addItems(["left", "right", "middle"])
-        click_form.addRow("X", self.editor_x_input)
-        click_form.addRow("Y", self.editor_y_input)
-        click_form.addRow("Nút", self.editor_button_input)
+        click_form2.addRow("X", self.editor_x_input)
+        click_form2.addRow("Y", self.editor_y_input)
+        click_form2.addRow("Nút", self.editor_button_input)
         self.editor_stack.addWidget(self.editor_page_click)
-
+        
         self.editor_page_move = self._make_editor_page()
-        move_layout = QtWidgets.QVBoxLayout(self.editor_page_move)
-        move_info = QtWidgets.QLabel("Mỗi dòng là một điểm: thời gian(ms),x,y. Ví dụ: 120,500,300 (sau 120ms di chuyển đến 500,300)")
-        move_info.setObjectName("MutedLabelAlt")
-        move_info.setWordWrap(True)
+        move_layout2 = QtWidgets.QVBoxLayout(self.editor_page_move)
+        move_info = QtWidgets.QLabel("Mỗi dòng 1 điểm: t(ms),x,y")
+        move_info.setObjectName("MutedLabel")
         self.editor_points_input = QtWidgets.QPlainTextEdit()
-        self.editor_points_input.setPlaceholderText("0,100,200\n35,120,210\n80,180,260")
-        move_layout.addWidget(move_info)
-        move_layout.addWidget(self.editor_points_input)
+        move_layout2.addWidget(move_info)
+        move_layout2.addWidget(self.editor_points_input)
         self.editor_stack.addWidget(self.editor_page_move)
+        
+        self.editor_page_empty = self._make_editor_page()
+        self.editor_stack.addWidget(self.editor_page_empty)
 
         self.editor_page_wait = self._make_editor_page()
-        wait_form = QtWidgets.QFormLayout(self.editor_page_wait)
+        wait_form2 = QtWidgets.QFormLayout(self.editor_page_wait)
         self.editor_duration_input = QtWidgets.QLineEdit()
-        wait_form.addRow("Thời gian chờ (ms)", self.editor_duration_input)
+        wait_form2.addRow("Chờ (ms)", self.editor_duration_input)
         self.editor_stack.addWidget(self.editor_page_wait)
-
+        
         editor_buttons = QtWidgets.QGridLayout()
-        editor_buttons.setHorizontalSpacing(8)
-        editor_buttons.setVerticalSpacing(8)
-        self.apply_edit_button = QtWidgets.QPushButton("Áp dụng thay đổi")
+        editor_buttons.setSpacing(8)
+        self.apply_edit_button = QtWidgets.QPushButton("Áp dụng")
         self.apply_edit_button.setProperty("variant", "primary")
         self.apply_edit_button.clicked.connect(self._apply_selected_action_edits)
+        
         self.duplicate_action_button = QtWidgets.QPushButton("Nhân bản")
         self.duplicate_action_button.setProperty("variant", "secondary")
         self.duplicate_action_button.clicked.connect(self._duplicate_selected_action)
+        
         self.insert_action_button = QtWidgets.QPushButton("Chèn dưới")
         self.insert_action_button.setProperty("variant", "secondary")
         self.insert_action_button.clicked.connect(self._insert_action_below_selected)
-        self.reload_action_button = QtWidgets.QPushButton("Nạp lại")
-        self.reload_action_button.setProperty("variant", "secondary")
-        self.reload_action_button.clicked.connect(
-            lambda: self._load_selected_action_into_editor(self.action_list.currentRow())
-        )
+        
+        self.reload_action_button = QtWidgets.QPushButton("Hủy đổi")
+        self.reload_action_button.setProperty("variant", "ghost")
+        self.reload_action_button.clicked.connect(lambda: self._load_selected_action_into_editor(self.action_list.currentRow()))
+        
         editor_buttons.addWidget(self.apply_edit_button, 0, 0)
         editor_buttons.addWidget(self.duplicate_action_button, 0, 1)
-        editor_buttons.addWidget(self.insert_action_button, 0, 2)
-        editor_buttons.addWidget(self.reload_action_button, 0, 3)
-        editor_layout.addLayout(editor_buttons)
+        editor_buttons.addWidget(self.insert_action_button, 1, 0)
+        editor_buttons.addWidget(self.reload_action_button, 1, 1)
+        edit_layout.addLayout(editor_buttons)
+        
+        self.inspector_stack.addWidget(edit_scroll)
+        self.body_splitter.addWidget(right_panel)
+        
+        # Set splitter ratios
+        self.body_splitter.setStretchFactor(0, 1)
+        self.body_splitter.setStretchFactor(1, 3)
+        self.body_splitter.setStretchFactor(2, 1)
+        self.body_splitter.setSizes([260, 500, 300])
 
-        right_scroll = QtWidgets.QScrollArea()
-        right_scroll.setWidgetResizable(True)
-        right_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        right_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
-        right_scroll.setObjectName("RightScroll")
-        self.body_splitter.addWidget(right_scroll)
-
-        right_host = QtWidgets.QWidget()
-        right_scroll.setWidget(right_host)
-        right_stack = QtWidgets.QVBoxLayout(right_host)
-        right_stack.setContentsMargins(0, 0, 4, 0)
-        right_stack.setSpacing(10)
-
-        control_card = self._create_card()
-        control_layout = QtWidgets.QGridLayout(control_card)
-        control_layout.setContentsMargins(18, 18, 18, 18)
-        control_layout.setHorizontalSpacing(8)
-        control_layout.setVerticalSpacing(8)
-        right_stack.addWidget(control_card)
-
-        control_title = QtWidgets.QLabel("Điều khiển Macro")
-        control_title.setObjectName("SectionTitle")
-        control_text = QtWidgets.QLabel(
-            "Bắt đầu chạy macro vô hạn. Dừng bằng nút Stop, phím F8, hoặc kéo chuột lên góc trên trái màn hình. Chế độ Ghi Thay thế sẽ xóa macro cũ khi bắt đầu ghi."
-        )
-        control_text.setObjectName("MutedLabel")
-        control_text.setWordWrap(True)
-        control_layout.addWidget(control_title, 0, 0, 1, 3)
-        control_layout.addWidget(control_text, 1, 0, 1, 3)
-
-        self.start_button = QtWidgets.QPushButton("Bắt đầu")
-        self.start_button.setProperty("variant", "primary")
-        self.start_button.clicked.connect(self._start_macro)
-        control_layout.addWidget(self.start_button, 2, 0)
-
-        self.stop_button = QtWidgets.QPushButton("Dừng")
-        self.stop_button.setProperty("variant", "danger")
-        self.stop_button.clicked.connect(self._stop_macro)
-        control_layout.addWidget(self.stop_button, 2, 1)
-
-        capture_button = QtWidgets.QPushButton("Chụp vị trí chuột")
-        capture_button.setProperty("variant", "secondary")
-        capture_button.clicked.connect(self._capture_mouse_position)
-        control_layout.addWidget(capture_button, 2, 2)
-
-        record_append = QtWidgets.QPushButton("Ghi thêm")
-        record_append.setProperty("variant", "secondary")
-        record_append.clicked.connect(lambda: self._toggle_recording(False))
-        control_layout.addWidget(record_append, 3, 0)
-
-        record_replace = QtWidgets.QPushButton("Ghi thay thế")
-        record_replace.setProperty("variant", "primary")
-        record_replace.clicked.connect(lambda: self._toggle_recording(True))
-        control_layout.addWidget(record_replace, 3, 1)
-
-        stop_record = QtWidgets.QPushButton("Dừng ghi")
-        stop_record.setProperty("variant", "secondary")
-        stop_record.clicked.connect(self._stop_recording)
-        control_layout.addWidget(stop_record, 3, 2)
-
-        settings_card = self._create_card(alt=True)
-        settings_layout = QtWidgets.QFormLayout(settings_card)
-        settings_layout.setContentsMargins(18, 18, 18, 18)
-        settings_layout.setSpacing(10)
-        right_stack.addWidget(settings_card)
-
-        settings_title = QtWidgets.QLabel("Cài đặt chung")
-        settings_title.setObjectName("SectionTitleAlt")
-        settings_layout.addRow(settings_title)
-
-        self.default_delay_input = QtWidgets.QLineEdit(str(DEFAULT_DELAY_MS))
-        self.record_after_input = QtWidgets.QLineEdit("2")
-        settings_layout.addRow("Độ trễ mặc định sau mỗi bước (ms)", self.default_delay_input)
-        settings_layout.addRow("Chờ trước khi ghi (giây)", self.record_after_input)
-
-        info = QtWidgets.QLabel(
-            "Chế độ ghi thông minh sẽ ghi lại việc nhấn giữ/thả phím, click chuột và quỹ đạo di chuyển chuột với thời gian thực giữa các bước."
-        )
-        info.setWordWrap(True)
-        info.setObjectName("MutedLabelAlt")
-        settings_layout.addRow(info)
-
-        key_card = self._create_card()
-        key_layout = QtWidgets.QFormLayout(key_card)
-        key_layout.setContentsMargins(18, 18, 18, 18)
-        key_layout.setSpacing(10)
-        right_stack.addWidget(key_card)
-
-        key_title = QtWidgets.QLabel("Thêm phím nhanh")
-        key_title.setObjectName("SectionTitle")
-        key_layout.addRow(key_title)
-        self.key_name_input = QtWidgets.QLineEdit("a")
-        self.key_delay_input = QtWidgets.QLineEdit(str(DEFAULT_DELAY_MS))
-        key_layout.addRow("Phím", self.key_name_input)
-        key_hint = QtWidgets.QLabel("Thêm hành động nhấn một phím đơn giản. Ví dụ: a (phím A), enter (Enter), space (Space), tab (Tab), esc (Escape), f1 (F1), ctrl_l (Ctrl trái)")
-        key_hint.setWordWrap(True)
-        key_hint.setObjectName("MutedLabel")
-        key_layout.addRow(key_hint)
-        key_layout.addRow("Nghỉ sau bước (ms)", self.key_delay_input)
-        add_key = QtWidgets.QPushButton("Thêm phím")
-        add_key.setProperty("variant", "secondary")
-        add_key.clicked.connect(self._add_key_action)
-        key_layout.addRow(add_key)
-
-        combo_card = self._create_card()
-        combo_layout = QtWidgets.QFormLayout(combo_card)
-        combo_layout.setContentsMargins(18, 18, 18, 18)
-        combo_layout.setSpacing(10)
-        right_stack.addWidget(combo_card)
-
-        combo_title = QtWidgets.QLabel("Thêm tổ hợp phím")
-        combo_title.setObjectName("SectionTitle")
-        combo_layout.addRow(combo_title)
-        combo_modifiers = QtWidgets.QHBoxLayout()
-        self.combo_ctrl = QtWidgets.QCheckBox("Ctrl")
-        self.combo_shift = QtWidgets.QCheckBox("Shift")
-        self.combo_alt = QtWidgets.QCheckBox("Alt")
-        self.combo_win = QtWidgets.QCheckBox("Win")
-        for checkbox in [self.combo_ctrl, self.combo_shift, self.combo_alt, self.combo_win]:
-            combo_modifiers.addWidget(checkbox)
-        self.combo_key_input = QtWidgets.QLineEdit("c")
-        self.combo_delay_input = QtWidgets.QLineEdit(str(DEFAULT_DELAY_MS))
-        combo_hint_2 = QtWidgets.QLabel("Thêm hành động nhấn tổ hợp phím (nhiều phím cùng lúc). Ví dụ: Ctrl+C (sao chép), Ctrl+V (dán), Ctrl+Shift+S (lưu dưới dạng)")
-        combo_hint_2.setObjectName("MutedLabel")
-        combo_hint_2.setWordWrap(True)
-        combo_layout.addRow("Modifier", combo_modifiers)
-        combo_layout.addRow("Key chính", self.combo_key_input)
-        combo_layout.addRow("Nghỉ sau bước (ms)", self.combo_delay_input)
-        combo_layout.addRow(combo_hint_2)
-        add_combo = QtWidgets.QPushButton("Thêm tổ hợp")
-        add_combo.setProperty("variant", "secondary")
-        add_combo.clicked.connect(self._add_combo_action)
-        combo_layout.addRow(add_combo)
-
-        mouse_card = self._create_card()
-        mouse_layout = QtWidgets.QFormLayout(mouse_card)
-        mouse_layout.setContentsMargins(18, 18, 18, 18)
-        mouse_layout.setSpacing(10)
-        right_stack.addWidget(mouse_card)
-
-        mouse_title = QtWidgets.QLabel("Thêm click chuột")
-        mouse_title.setObjectName("SectionTitle")
-        mouse_layout.addRow(mouse_title)
-        self.mouse_x_input = QtWidgets.QLineEdit("0")
-        self.mouse_y_input = QtWidgets.QLineEdit("0")
-        self.mouse_button_input = QtWidgets.QComboBox()
-        self.mouse_button_input.addItems(["left", "right", "middle"])
-        self.mouse_delay_input = QtWidgets.QLineEdit(str(DEFAULT_DELAY_MS))
-        mouse_hint = QtWidgets.QLabel("Thêm hành động click chuột tại vị trí cụ thể. Sử dụng nút 'Chụp vị trí chuột' để lấy tọa độ hiện tại của con trỏ.")
-        mouse_hint.setObjectName("MutedLabel")
-        mouse_hint.setWordWrap(True)
-        mouse_layout.addRow("X", self.mouse_x_input)
-        mouse_layout.addRow("Y", self.mouse_y_input)
-        mouse_layout.addRow("Nút", self.mouse_button_input)
-        mouse_layout.addRow("Nghỉ sau bước (ms)", self.mouse_delay_input)
-        mouse_layout.addRow(mouse_hint)
-        add_mouse = QtWidgets.QPushButton("Thêm click")
-        add_mouse.setProperty("variant", "secondary")
-        add_mouse.clicked.connect(self._add_mouse_action)
-        mouse_layout.addRow(add_mouse)
-
-        wait_card = self._create_card()
-        wait_layout = QtWidgets.QFormLayout(wait_card)
-        wait_layout.setContentsMargins(18, 18, 18, 18)
-        wait_layout.setSpacing(10)
-        right_stack.addWidget(wait_card)
-
-        wait_title = QtWidgets.QLabel("Thêm bước chờ")
-        wait_title.setObjectName("SectionTitle")
-        wait_layout.addRow(wait_title)
-        self.wait_input = QtWidgets.QLineEdit("1000")
-        wait_hint = QtWidgets.QLabel("Thêm thời gian chờ giữa các bước để ứng dụng có thời gian phản hồi. Ví dụ: Chờ 1000ms (1 giây) sau khi click.")
-        wait_hint.setObjectName("MutedLabel")
-        wait_hint.setWordWrap(True)
-        wait_layout.addRow("Thời gian chờ (ms)", self.wait_input)
-        wait_layout.addRow(wait_hint)
-        add_wait = QtWidgets.QPushButton("Thêm chờ")
-        add_wait.setProperty("variant", "secondary")
-        add_wait.clicked.connect(self._add_wait_action)
-        wait_layout.addRow(add_wait)
-        right_stack.addStretch(1)
-
-        self.body_splitter.setStretchFactor(0, 7)
-        self.body_splitter.setStretchFactor(1, 5)
-        self.body_splitter.setSizes([760, 520])
-
-        status_card = QtWidgets.QFrame()
-        status_card.setObjectName("StatusCard")
-        status_layout = QtWidgets.QHBoxLayout(status_card)
-        status_layout.setContentsMargins(14, 12, 14, 12)
-        self.status_label = QtWidgets.QLabel(
-            "Sẵn sàng. Dừng macro bằng phím F8, nút Dừng, hoặc kéo chuột lên góc trên trái màn hình."
-        )
-        self.status_label.setObjectName("StatusLabel")
-        self.status_label.setWordWrap(True)
-        status_layout.addWidget(self.status_label)
-        root.addWidget(status_card)
+    def _handle_timeline_selection(self, current_row: int) -> None:
+        self._load_selected_action_into_editor(current_row)
+        if current_row >= 0:
+            self.inspector_stack.setCurrentIndex(1)
+        else:
+            self.inspector_stack.setCurrentIndex(0)
 
     def _apply_styles(self) -> None:
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, False)
         self.setAutoFillBackground(True)
+        
+        scale = getattr(self, '_last_scale_factor', 1.0)
+        
+        def spx(val: int) -> int:
+            return max(1, int(val * scale))
+
+        font_11 = spx(11)
+        font_12 = spx(12)
+        font_13 = spx(13)
+        font_14 = spx(14)
+        font_16 = spx(16)
+        font_20 = spx(20)
+
+        # UI/UX Pro Max Palette (Slate/Indigo inspired)
+        c_bg = "#F8FAFC" # slate-50
+        c_surface = "#FFFFFF"
+        c_panel = "#FFFFFF"
+        c_stroke = "#E2E8F0" # slate-200
+        c_text = "#0F172A" # slate-900
+        c_muted = "#64748B" # slate-500
+        c_primary = "#4F46E5" # indigo-600
+        c_primary_hover = "#4338CA" # indigo-700
+        c_danger = "#EF4444" # red-500
+        c_danger_hover = "#DC2626" # red-600
+
         self.setStyleSheet(
-            f"""
+            f'''
             QMainWindow {{
-                background: #08111D;
+                background: {c_bg};
             }}
             QWidget#AppRoot {{
-                background: qlineargradient(
-                    x1:0, y1:0, x2:1, y2:1,
-                    stop:0 rgba(8, 17, 29, 240),
-                    stop:0.45 rgba(10, 22, 37, 235),
-                    stop:1 rgba(16, 32, 54, 245)
-                );
+                background: {c_bg};
             }}
-            QFrame[card="true"] {{
-                background: {self.palette["panel"]};
-                border: 1px solid {self.palette["stroke"]};
-                border-radius: 22px;
+            QWidget#TopHeader {{
+                background: {c_surface};
+                border-bottom: 1px solid {c_stroke};
             }}
-            QFrame[cardAlt="true"] {{
-                background: {self.palette["panelAlt"]};
-                border: 1px solid {self.palette["stroke"]};
-                border-radius: 22px;
+            QFrame[card="true"], QFrame[cardAlt="true"] {{
+                background: {c_panel};
+                border: 1px solid {c_stroke};
+                border-radius: 12px;
             }}
             #HeroTitle {{
-                color: {self.palette["text"]};
-                font-size: 34px;
-                font-weight: 700;
+                color: {c_text};
+                font-size: {font_20}px;
+                font-weight: 800;
             }}
-            #HeroSubtitle {{
-                color: {self.palette["muted"]};
-                font-size: 13px;
+            #StatusLabel {{
+                color: {c_muted};
+                font-size: {font_12}px;
+                font-weight: 500;
             }}
             #SectionTitle, #SectionTitleAlt {{
-                color: {self.palette["text"]};
-                font-size: 18px;
-                font-weight: 650;
-            }}
-            #MutedLabel, #MutedLabelAlt {{
-                color: {self.palette["muted"]};
-                font-size: 12px;
-            }}
-            QLabel[statTitle="true"] {{
-                color: {self.palette["muted"]};
-                font-size: 11px;
-            }}
-            QLabel[statValue="true"] {{
-                color: {self.palette["text"]};
-                font-size: 26px;
+                color: {c_text};
+                font-size: {font_16}px;
                 font-weight: 700;
             }}
-            QListWidget#TimelineList {{
-                background: {self.palette["surface"]};
-                color: {self.palette["text"]};
-                border: 1px solid {self.palette["stroke"]};
-                border-radius: 18px;
-                padding: 8px;
+            #MutedLabel, #EmptyLabel {{
+                color: {c_muted};
+                font-size: {font_13}px;
+                font-weight: 500;
+            }}
+            #StatValue {{
+                color: {c_primary};
+                font-size: {font_20}px;
+                font-weight: 800;
+            }}
+            
+            QLabel {{
+                color: {c_text};
+            }}
+            
+            /* Scroll Area */
+            QScrollArea, QScrollArea > QWidget > QWidget {{
+                background: transparent;
+            }}
+            
+            /* Tabs */
+            QTabWidget::pane {{
+                border: 1px solid {c_stroke};
+                background: {c_surface};
+                border-radius: 8px;
+            }}
+            QTabBar::tab {{
+                background: transparent;
+                color: {c_muted};
+                padding: 10px 16px;
+                border-bottom: 2px solid transparent;
+                font-size: {font_13}px;
+                font-weight: 600;
+            }}
+            QTabBar::tab:selected {{
+                color: {c_primary};
+                border-bottom: 2px solid {c_primary};
+            }}
+            QTabBar::tab:hover:!selected {{
+                color: {c_text};
+            }}
+            
+            /* List Widgets */
+            QListWidget#TimelineList, QListWidget#CodeList {{
+                background: {c_bg};
+                color: {c_text};
+                border: 1px solid {c_stroke};
+                border-radius: 8px;
+                padding: 6px;
                 outline: none;
-                font-family: Consolas;
-                font-size: 12px;
+                font-size: {font_13}px;
+                font-weight: 500;
             }}
-            QListWidget#TimelineList::item {{
+            QListWidget#TimelineList::item, QListWidget#CodeList::item {{
                 padding: 10px 12px;
-                border-radius: 12px;
-                margin: 3px 4px;
+                border-radius: 6px;
+                margin: 2px 2px;
             }}
-            QListWidget#TimelineList::item:selected {{
-                background: rgba(116, 192, 252, 0.92);
-                color: #08111D;
+            QListWidget#TimelineList::item:selected, QListWidget#CodeList::item:selected {{
+                background: {c_primary};
+                color: #FFFFFF;
             }}
+            QListWidget#TimelineList::item:hover:!selected, QListWidget#CodeList::item:hover:!selected {{
+                background: {c_stroke};
+            }}
+            
+            /* Buttons */
             QPushButton {{
-                min-height: 42px;
-                border-radius: 14px;
-                border: 1px solid transparent;
+                min-height: 38px;
+                border-radius: 8px;
+                border: none;
                 padding: 0 16px;
-                font-size: 12px;
+                font-size: {font_13}px;
                 font-weight: 600;
             }}
             QPushButton[variant="primary"] {{
-                background: {self.palette["accent"]};
-                color: #08111D;
+                background: {c_primary};
+                color: #FFFFFF;
             }}
-            QPushButton[variant="secondary"] {{
-                background: rgba(28, 44, 69, 0.96);
-                color: {self.palette["text"]};
-                border: 1px solid {self.palette["stroke"]};
+            QPushButton[variant="primary"]:hover {{
+                background: {c_primary_hover};
             }}
             QPushButton[variant="danger"] {{
-                background: {self.palette["danger"]};
-                color: #180A10;
+                background: {c_danger};
+                color: #FFFFFF;
             }}
-            QPushButton:hover {{
-                border: 1px solid rgba(255, 255, 255, 0.18);
+            QPushButton[variant="danger"]:hover {{
+                background: {c_danger_hover};
             }}
-            QLineEdit, QComboBox {{
-                background: rgba(11, 22, 36, 0.92);
-                color: {self.palette["text"]};
-                border: 1px solid {self.palette["stroke"]};
-                border-radius: 12px;
-                min-height: 38px;
-                padding: 0 12px;
-                selection-background-color: {self.palette["accent2"]};
+            QPushButton[variant="secondary"] {{
+                background: {c_surface};
+                color: {c_text};
+                border: 1px solid {c_stroke};
+            }}
+            QPushButton[variant="secondary"]:hover {{
+                background: {c_bg};
+                border-color: {c_muted};
+            }}
+            QPushButton[variant="ghost"] {{
+                background: transparent;
+                color: {c_text};
+            }}
+            QPushButton[variant="ghost"]:hover {{
+                background: {c_stroke};
+            }}
+            QPushButton[variant="tool"] {{
+                background: {c_surface};
+                color: {c_text};
+                border: 1px solid {c_stroke};
+                text-align: left;
+                padding-left: 16px;
+                min-height: 44px;
+            }}
+            QPushButton[variant="tool"]:hover {{
+                border-color: {c_primary};
+                color: {c_primary};
+                background: {c_bg};
+            }}
+            
+            /* Inputs */
+            QLineEdit, QComboBox, QPlainTextEdit {{
+                background: {c_surface};
+                color: {c_text};
+                border: 1px solid {c_stroke};
+                border-radius: 6px;
+                min-height: 36px;
+                padding: 0 10px;
+                font-size: {font_13}px;
+                font-weight: 500;
+            }}
+            QLineEdit:focus, QComboBox:focus, QPlainTextEdit:focus {{
+                border: 2px solid {c_primary};
             }}
             QPlainTextEdit {{
-                background: rgba(11, 22, 36, 0.92);
-                color: {self.palette["text"]};
-                border: 1px solid {self.palette["stroke"]};
-                border-radius: 12px;
-                padding: 10px 12px;
-                selection-background-color: {self.palette["accent2"]};
-            }}
-            QCheckBox {{
-                color: {self.palette["text"]};
-                font-size: 12px;
-                spacing: 8px;
-            }}
-            QScrollArea#RightScroll {{
-                background: transparent;
-                border: none;
-            }}
-            QScrollBar:vertical {{
-                background: rgba(8, 17, 29, 0.35);
-                width: 10px;
-                border-radius: 5px;
-                margin: 4px 0 4px 0;
-            }}
-            QScrollBar::handle:vertical {{
-                background: rgba(116, 192, 252, 0.55);
-                border-radius: 5px;
-                min-height: 24px;
-            }}
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
-                height: 0px;
-            }}
-            QComboBox QAbstractItemView {{
-                background: {self.palette["panelSolid"]};
-                color: {self.palette["text"]};
-                selection-background-color: {self.palette["accent2"]};
+                padding: 10px;
             }}
             QFormLayout QLabel {{
-                color: {self.palette["muted"]};
-                font-size: 12px;
+                color: {c_text};
+                font-size: {font_13}px;
+                font-weight: 500;
             }}
-            #StatusCard {{
-                background: rgba(8, 17, 29, 0.92);
-                border: 1px solid {self.palette["stroke"]};
-                border-radius: 18px;
+            
+            QComboBox QAbstractItemView {{
+                background-color: {c_surface};
+                color: {c_text};
+                selection-background-color: {c_primary};
+                selection-color: #FFFFFF;
+                outline: none;
             }}
-            #StatusLabel {{
-                color: {self.palette["text"]};
-                font-size: 12px;
-            }}
-            """
+            '''
         )
 
     def _create_card(self, alt: bool = False) -> QtWidgets.QFrame:
         frame = QtWidgets.QFrame()
         if alt:
-            frame.setProperty("cardAlt", True)
+            frame.setProperty("cardAlt", "true")
         else:
-            frame.setProperty("card", True)
+            frame.setProperty("card", "true")
         effect = QtWidgets.QGraphicsDropShadowEffect(frame)
         effect.setBlurRadius(34)
         effect.setOffset(0, 14)
@@ -699,15 +819,15 @@ class MacroStudio(QtWidgets.QMainWindow):
 
     def _create_stat_card(self, title: str, value: str) -> tuple[QtWidgets.QFrame, QtWidgets.QLabel]:
         card = QtWidgets.QFrame()
-        card.setProperty("cardAlt", True)
+        card.setProperty("cardAlt", "true")
         layout = QtWidgets.QVBoxLayout(card)
         layout.setContentsMargins(14, 12, 14, 12)
         layout.setSpacing(6)
 
         title_label = QtWidgets.QLabel(title)
-        title_label.setProperty("statTitle", True)
+        title_label.setProperty("statTitle", "true")
         value_label = QtWidgets.QLabel(value)
-        value_label.setProperty("statValue", True)
+        value_label.setProperty("statValue", "true")
         layout.addWidget(title_label)
         layout.addWidget(value_label)
         return card, value_label
@@ -771,83 +891,53 @@ class MacroStudio(QtWidgets.QMainWindow):
     def _default_delay(self) -> int:
         return self._read_int(self.default_delay_input.text(), "Delay mặc định", 0)
 
-    def _add_key_action(self) -> None:
-        try:
-            delay = self._read_int(self.key_delay_input.text(), "Delay sau phím", 0)
-        except ValueError as exc:
-            QtWidgets.QMessageBox.critical(self, "Sai dữ liệu", str(exc))
-            return
-
-        key_name = self.key_name_input.text().strip().lower()
-        if not key_name:
-            QtWidgets.QMessageBox.critical(self, "Thiếu dữ liệu", "Bạn cần nhập tên phím.")
-            return
-
+    def _add_action_and_select(self, action: MacroAction) -> None:
         with self.actions_lock:
-            self.actions.append(MacroAction(action_type="key_tap", key=key_name, post_delay_ms=delay))
+            self.actions.append(action)
+            index = len(self.actions) - 1
         self.refresh_actions_requested.emit()
+        self.action_list.setCurrentRow(index)
         self._save_actions(silent=True)
-        self.status_changed.emit(f"Đã thêm phím '{key_name}'.")
+        self.status_changed.emit(f"Đã thêm: {action.describe()}")
+
+    def _add_key_action(self) -> None:
+        self._add_action_and_select(MacroAction(action_type="key_tap", key="a", post_delay_ms=50))
 
     def _add_combo_action(self) -> None:
-        try:
-            delay = self._read_int(self.combo_delay_input.text(), "Delay sau tổ hợp", 0)
-        except ValueError as exc:
-            QtWidgets.QMessageBox.critical(self, "Sai dữ liệu", str(exc))
-            return
-
-        main_key = self.combo_key_input.text().strip().lower()
-        if not main_key:
-            QtWidgets.QMessageBox.critical(self, "Thiếu dữ liệu", "Bạn cần nhập key chính cho tổ hợp.")
-            return
-
-        keys: list[str] = []
-        if self.combo_ctrl.isChecked():
-            keys.append("ctrl_l")
-        if self.combo_shift.isChecked():
-            keys.append("shift_l")
-        if self.combo_alt.isChecked():
-            keys.append("alt_l")
-        if self.combo_win.isChecked():
-            keys.append("cmd")
-        keys.append(main_key)
-
-        with self.actions_lock:
-            self.actions.append(MacroAction(action_type="combo_press", keys=keys, post_delay_ms=delay))
-        self.refresh_actions_requested.emit()
-        self._save_actions(silent=True)
-        self.status_changed.emit(f"Đã thêm tổ hợp {' + '.join(keys)}.")
+        self._add_action_and_select(MacroAction(action_type="combo_press", keys=["ctrl_l", "c"], post_delay_ms=50))
 
     def _add_mouse_action(self) -> None:
-        try:
-            x = self._read_int(self.mouse_x_input.text(), "Tọa độ X")
-            y = self._read_int(self.mouse_y_input.text(), "Tọa độ Y")
-            delay = self._read_int(self.mouse_delay_input.text(), "Delay sau click", 0)
-        except ValueError as exc:
-            QtWidgets.QMessageBox.critical(self, "Sai dữ liệu", str(exc))
-            return
-
-        button = self.mouse_button_input.currentText().strip().lower() or "left"
-        with self.actions_lock:
-            self.actions.append(
-                MacroAction(action_type="mouse_click", x=x, y=y, button=button, post_delay_ms=delay)
-            )
-        self.refresh_actions_requested.emit()
-        self._save_actions(silent=True)
-        self.status_changed.emit(f"Đã thêm click {button} tại ({x}, {y}).")
+        self._add_action_and_select(MacroAction(action_type="mouse_click", x=0, y=0, button="left", post_delay_ms=50))
 
     def _add_wait_action(self) -> None:
-        try:
-            duration_ms = self._read_int(self.wait_input.text(), "Thời gian chờ", 1)
-        except ValueError as exc:
-            QtWidgets.QMessageBox.critical(self, "Sai dữ liệu", str(exc))
-            return
+        self._add_action_and_select(MacroAction(action_type="wait", duration_ms=1000))
 
-        with self.actions_lock:
-            self.actions.append(MacroAction(action_type="wait", duration_ms=duration_ms))
-        self.refresh_actions_requested.emit()
-        self._save_actions(silent=True)
-        self.status_changed.emit(f"Đã thêm bước chờ {duration_ms}ms.")
+    def _add_clipboard_code_action(self) -> None:
+        self._add_action_and_select(MacroAction(action_type="set_clipboard_code", post_delay_ms=50))
+
+    def _add_type_code_action(self) -> None:
+        self._add_action_and_select(MacroAction(action_type="type_code", post_delay_ms=50))
+
+    def _fetch_codes(self) -> None:
+        self.code_status_label.setText("Đang tải code từ web...")
+        self.code_manager.fetch_from_api()
+
+    def _load_codes_from_json(self) -> None:
+        self.code_status_label.setText("Đang đọc codes.json...")
+        self.code_manager.load_from_json()
+
+    def _on_codes_loaded(self, codes: list) -> None:
+        range_text = self.code_range_input.text().strip()
+        filtered = self.code_manager.get_filtered(range_text)
+
+        self.code_list_widget.clear()
+        for code in filtered:
+            self.code_list_widget.addItem(code.preview(40))
+
+        self.code_status_label.setText(
+            f"Đã tải {len(codes)} code tổng | Hiển thị {len(filtered)} code"
+        )
+        self.status_changed.emit(f"Code Manager: Đã tải {len(codes)} code từ yumifang3.site.")
 
     def _remove_selected(self) -> None:
         row = self.action_list.currentRow()
@@ -933,8 +1023,10 @@ class MacroStudio(QtWidgets.QMainWindow):
         self.showNormal()
         self.raise_()
         self.activateWindow()
-        self.mouse_x_input.setText(str(x))
-        self.mouse_y_input.setText(str(y))
+        if hasattr(self, 'editor_x_input'):
+            self.editor_x_input.setText(str(x))
+        if hasattr(self, 'editor_y_input'):
+            self.editor_y_input.setText(str(y))
         self.status_changed.emit(f"Đã lấy tọa độ chuột: ({x}, {y}).")
 
     def _toggle_recording(self, replace_existing: bool) -> None:
@@ -1164,13 +1256,31 @@ class MacroStudio(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, "Chưa có macro", "Bạn cần thêm ít nhất một bước.")
             return
 
+        # Nếu macro có bước liên quan đến code, setup queue
+        has_code_action = any(a.action_type in ("set_clipboard_code", "type_code") for a in actions)
+        if has_code_action:
+            range_text = self.code_range_input.text().strip()
+            queue_size = self.code_manager.setup_queue(range_text)
+            if queue_size == 0:
+                QtWidgets.QMessageBox.warning(
+                    self, "Chưa có code",
+                    "Macro có bước 'Nạp code' hoặc 'Gõ code' nhưng chưa tải code.\nHãy tải code từ web hoặc file trước."
+                )
+                return
+
         self.stop_event.clear()
         self.is_running = True
         self.loop_changed.emit("0")
         self.hide()
-        self.status_changed.emit(
-            "Macro đang chạy vô hạn. Nhấn F8, Stop hoặc đưa chuột lên góc trên trái để dừng."
-        )
+        if has_code_action:
+            current, total = self.code_manager.get_progress()
+            self.status_changed.emit(
+                f"Macro đang chạy với {total} code. Nhấn F8 hoặc đưa chuột lên góc trái để dừng."
+            )
+        else:
+            self.status_changed.emit(
+                "Macro đang chạy vô hạn. Nhấn F8, Stop hoặc đưa chuột lên góc trên trái để dừng."
+            )
         self.runner_thread = threading.Thread(target=self._run_macro_loop, daemon=True)
         self.runner_thread.start()
 
@@ -1209,6 +1319,7 @@ class MacroStudio(QtWidgets.QMainWindow):
         if action.action_type == "key_tap":
             key_obj = self._parse_key(action.key)
             self.keyboard_controller.press(key_obj)
+            time.sleep(0.03)  # 30ms hold cho emulator nhận diện
             self.keyboard_controller.release(key_obj)
             self._sleep_with_stop(action.post_delay_ms / 1000)
             return
@@ -1234,8 +1345,13 @@ class MacroStudio(QtWidgets.QMainWindow):
             parsed_keys = [self._parse_key(key_name) for key_name in combo_keys]
             for key_obj in parsed_keys:
                 self.keyboard_controller.press(key_obj)
+                time.sleep(0.04)  # 40ms giữa các phím (ví dụ ctrl -> 40ms -> v)
+            
+            time.sleep(0.03)  # Giữ toàn bộ combo trong 30ms
+            
             for key_obj in reversed(parsed_keys):
                 self.keyboard_controller.release(key_obj)
+                time.sleep(0.02)  # 20ms release
             self._sleep_with_stop(action.post_delay_ms / 1000)
             return
 
@@ -1246,6 +1362,45 @@ class MacroStudio(QtWidgets.QMainWindow):
 
         if action.action_type == "wait":
             self._sleep_with_stop(action.duration_ms / 1000)
+            return
+
+        if action.action_type == "set_clipboard_code":
+            code_text = self.code_manager.next_code()
+            if code_text is None:
+                self.stop_event.set()
+                current, total = self.code_manager.get_progress()
+                self.status_changed.emit(f"Đã nhập xong {total} code.")
+                return
+            
+            # Gửi tín hiệu sang luồng chính để copy
+            self.clipboard_set_requested.emit(code_text)
+            # Chờ một lúc để luồng chính có thời gian xử lý và giả lập kịp nhận diện thay đổi clipboard
+            time.sleep(0.5)
+            
+            code_id = self.code_manager.get_current_code_id()
+            current, total = self.code_manager.get_progress()
+            self.status_changed.emit(f"📋 Code #{code_id} ({current}/{total}) → clipboard")
+            self._sleep_with_stop(action.post_delay_ms / 1000)
+            return
+
+        if action.action_type == "type_code":
+            code_text = self.code_manager.next_code()
+            if code_text is None:
+                self.stop_event.set()
+                current, total = self.code_manager.get_progress()
+                self.status_changed.emit(f"Đã gõ xong {total} code.")
+                return
+            
+            # Gõ trực tiếp từng ký tự
+            for char in code_text:
+                self.keyboard_controller.type(char)
+                time.sleep(0.02)  # Delay nhỏ giữa các phím để giả lập nhận diện
+            
+            code_id = self.code_manager.get_current_code_id()
+            current, total = self.code_manager.get_progress()
+            self.status_changed.emit(f"✍️ Đã gõ Code #{code_id} ({current}/{total})")
+            self._sleep_with_stop(action.post_delay_ms / 1000)
+            return
 
     def _play_mouse_path(self, action: MacroAction) -> None:
         if not action.points:
@@ -1404,8 +1559,6 @@ class MacroStudio(QtWidgets.QMainWindow):
 
     def _make_editor_page(self) -> QtWidgets.QWidget:
         page = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(page)
-        layout.setContentsMargins(0, 0, 0, 0)
         return page
 
     def _update_editor_stack_visibility(self, action_type: str) -> None:
@@ -1417,6 +1570,8 @@ class MacroStudio(QtWidgets.QMainWindow):
             "mouse_click": self.editor_page_click,
             "mouse_move": self.editor_page_move,
             "wait": self.editor_page_wait,
+            "set_clipboard_code": self.editor_page_empty,
+            "type_code": self.editor_page_empty,
         }
         self.editor_stack.setCurrentWidget(page_map.get(action_type, self.editor_page_key))
 
@@ -1430,8 +1585,10 @@ class MacroStudio(QtWidgets.QMainWindow):
         self._updating_editor = True
         self.editor_action_type.setCurrentText(action.action_type)
         self.editor_post_delay.setText(str(action.post_delay_ms))
-        self.editor_key_input.setText(action.key)
-        self.editor_combo_keys_input.setText(", ".join(action.keys))
+        self.editor_key_input.setCurrentText(action.key)
+        self.editor_combo_key1.setCurrentText(action.keys[0] if len(action.keys) > 0 else "")
+        self.editor_combo_key2.setCurrentText(action.keys[1] if len(action.keys) > 1 else "")
+        self.editor_combo_key3.setCurrentText(action.keys[2] if len(action.keys) > 2 else "")
         self.editor_x_input.setText(str(action.x))
         self.editor_y_input.setText(str(action.y))
         self.editor_button_input.setCurrentText(action.button or "left")
@@ -1447,8 +1604,10 @@ class MacroStudio(QtWidgets.QMainWindow):
         self._updating_editor = True
         self.editor_action_type.setCurrentText("key_tap")
         self.editor_post_delay.setText(str(DEFAULT_DELAY_MS))
-        self.editor_key_input.clear()
-        self.editor_combo_keys_input.clear()
+        self.editor_key_input.setCurrentText("")
+        self.editor_combo_key1.setCurrentText("")
+        self.editor_combo_key2.setCurrentText("")
+        self.editor_combo_key3.setCurrentText("")
         self.editor_x_input.clear()
         self.editor_y_input.clear()
         self.editor_button_input.setCurrentText("left")
@@ -1474,14 +1633,18 @@ class MacroStudio(QtWidgets.QMainWindow):
         action = MacroAction(action_type=action_type, post_delay_ms=post_delay_ms)
 
         if action_type in {"key_tap", "key_down", "key_up"}:
-            key_name = self.editor_key_input.text().strip().lower()
+            key_name = self.editor_key_input.currentText().strip().lower()
             if not key_name:
                 raise ValueError("Bạn cần nhập key.")
             action.key = key_name
             return action
 
         if action_type == "combo_press":
-            raw_keys = [item.strip().lower() for item in self.editor_combo_keys_input.text().split(",")]
+            raw_keys = [
+                self.editor_combo_key1.currentText().strip().lower(),
+                self.editor_combo_key2.currentText().strip().lower(),
+                self.editor_combo_key3.currentText().strip().lower()
+            ]
             keys = [item for item in raw_keys if item]
             if not keys:
                 raise ValueError("Bạn cần nhập ít nhất một key cho tổ hợp.")
@@ -1503,6 +1666,9 @@ class MacroStudio(QtWidgets.QMainWindow):
 
         if action_type == "wait":
             action.duration_ms = self._read_int(self.editor_duration_input.text(), "Thời gian chờ", 1)
+            return action
+
+        if action_type in ("set_clipboard_code", "type_code"):
             return action
 
         raise ValueError("Loại action không được hỗ trợ.")
